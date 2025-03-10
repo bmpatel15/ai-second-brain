@@ -1,0 +1,11 @@
+{
+	"id": "ai-second-brain",
+	"name": "AI-Powered Second Brain",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "AI-powered note linking, summarization, and writing assistant.",
+	"author": "Your Name",
+	"authorUrl": "https://yourwebsite.com",
+	"isDesktopOnly": false
+  }
+  
