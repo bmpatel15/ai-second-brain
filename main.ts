@@ -20,6 +20,11 @@ const DEFAULT_SETTINGS: AIPoweredSecondBrainSettings = {
     ollamaModel: "mistral"
 };
 
+interface ChatMessage {
+    role: "user" | "assistant" | "system";
+    content: string;
+}
+
 class AIPoweredSecondBrainSettingTab extends PluginSettingTab {
     plugin: AIPoweredSecondBrain;
 
@@ -87,6 +92,7 @@ class AIChatView extends ItemView {
     private chatContainer: HTMLElement;
     private inputContainer: HTMLElement;
     private plugin: AIPoweredSecondBrain;
+    private chatHistory: ChatMessage[] = [];
 
     constructor(leaf: WorkspaceLeaf, plugin: AIPoweredSecondBrain) {
         super(leaf);
@@ -118,20 +124,37 @@ class AIChatView extends ItemView {
         // Create input container
         this.inputContainer = this.contentEl.createEl("div", { cls: "chat-input-container" });
         
-        // Create quick action buttons
-        const buttonContainer = this.inputContainer.createEl("div", { cls: "quick-actions" });
-        
-        // Add quick action buttons
-        this.createQuickActionButton(buttonContainer, "Summarize", async () => {
-            await this.summarizeCurrentNote();
+        // Create quick action buttons container with a specific class
+        const buttonContainer = this.inputContainer.createEl("div", { 
+            cls: "quick-actions",
+            attr: { style: "display: flex; gap: 8px; margin-bottom: 8px;" }
         });
         
-        this.createQuickActionButton(buttonContainer, "Find Related", async () => {
-            await this.findRelatedNotes();
-        });
-        
-        this.createQuickActionButton(buttonContainer, "Analyze", async () => {
-            await this.analyzeCurrentNote();
+        // Add all quick action buttons including Clear History
+        const buttons = [
+            { label: "Summarize", callback: () => this.summarizeCurrentNote() },
+            { label: "Find Related", callback: () => this.findRelatedNotes() },
+            { label: "Analyze", callback: () => this.analyzeCurrentNote() },
+            { 
+                label: "Clear History", 
+                callback: async () => {
+                    const confirmed = confirm("Are you sure you want to clear the chat history?");
+                    if (confirmed) {
+                        await this.clearHistory();
+                        new Notice("Chat history cleared!");
+                    }
+                },
+                icon: "trash" // Add an icon to make it more visible
+            }
+        ];
+
+        // Create all buttons
+        buttons.forEach(btn => {
+            const button = buttonContainer.createEl("button", { text: btn.label });
+            if (btn.icon) {
+                button.addClass(btn.icon);
+            }
+            button.addEventListener("click", btn.callback);
         });
 
         // Create chat input
@@ -139,6 +162,12 @@ class AIChatView extends ItemView {
             cls: "chat-input",
             attr: { placeholder: "Ask me anything about your note..." }
         });
+
+        // Initialize chat with a system message
+        this.chatHistory = [{
+            role: "system",
+            content: "You are a helpful AI assistant for note-taking and writing. You help users understand and analyze their notes."
+        }];
 
         // Handle input submission
         textarea.addEventListener("keydown", async (e) => {
@@ -153,13 +182,9 @@ class AIChatView extends ItemView {
         });
     }
 
-    private createQuickActionButton(container: HTMLElement, label: string, callback: () => void) {
-        const button = container.createEl("button", { text: label });
-        button.addEventListener("click", callback);
-    }
-
     private async handleUserInput(input: string) {
         this.addChatMessage("user", input);
+        this.chatHistory.push({ role: "user", content: input });
         
         try {
             const activeFile = this.app.workspace.getActiveFile();
@@ -170,9 +195,26 @@ class AIChatView extends ItemView {
 
             const indicator = this.showTypingIndicator();
             const content = await this.app.vault.read(activeFile);
-            const response = await this.plugin.callAI(content, input);
+            
+            // Add current note context to the conversation
+            this.chatHistory.push({
+                role: "system",
+                content: `Current note content:\n${content}`
+            });
+
+            const response = await this.plugin.callAIWithHistory(this.chatHistory);
             this.removeTypingIndicator(indicator);
+            
+            // Add AI's response to history
+            this.chatHistory.push({ role: "assistant", content: response });
             this.addChatMessage("assistant", response);
+
+            // Remove the note content from history to keep it clean
+            this.chatHistory = this.chatHistory.filter(msg => 
+                msg.role !== "system" || 
+                !msg.content.startsWith("Current note content:")
+            );
+
         } catch (error) {
             console.error(error);
             this.addChatMessage("assistant", "Sorry, there was an error processing your request.");
@@ -377,6 +419,15 @@ EXCERPT: relevant text here`;
         }
         messageEl.textContent = message;
     }
+
+    private async clearHistory() {
+        this.chatHistory = [{
+            role: "system",
+            content: "You are a helpful AI assistant for note-taking and writing. You help users understand and analyze their notes."
+        }];
+        this.chatContainer.empty();
+        new Notice("Chat history has been cleared");
+    }
 }
 
 export default class AIPoweredSecondBrain extends Plugin {
@@ -442,6 +493,62 @@ export default class AIPoweredSecondBrain extends Plugin {
         this.registerView(
             "ai-chat-view",
             (leaf) => new AIChatView(leaf, this)
+        );
+
+        // Add editor menu item (appears when text is selected)
+        this.registerEvent(
+            this.app.workspace.on("editor-menu", (menu, editor) => {
+                const selection = editor.getSelection();
+                if (selection) {
+                    // Add "Summarize and Replace" option
+                    menu.addItem((item) => {
+                        item
+                            .setTitle("Replace with Summary")
+                            .setIcon("replace")
+                            .onClick(async () => {
+                                const indicator = new Notice("🤔 Summarizing...");
+                                try {
+                                    const summary = await this.callAI(
+                                        selection,
+                                        "Summarize this text concisely in 1-2 sentences, preserving key information."
+                                    );
+                                    editor.replaceSelection(`${summary}`);
+                                    indicator.hide();
+                                    new Notice("✅ Summary added!");
+                                } catch (error) {
+                                    indicator.hide();
+                                    new Notice("❌ Error generating summary");
+                                    console.error(error);
+                                }
+                            });
+                    });
+
+                    // Add "Append Summary" option
+                    menu.addItem((item) => {
+                        item
+                            .setTitle("Append Summary")
+                            .setIcon("brain")
+                            .onClick(async () => {
+                                const indicator = new Notice("🤔 Summarizing...");
+                                try {
+                                    const summary = await this.callAI(
+                                        selection,
+                                        "Summarize this text concisely in 1-2 sentences, preserving key information."
+                                    );
+                                    editor.replaceSelection(
+                                        `${selection}\n\n> [!summary]- AI Summary\n> ${summary}\n\n`
+                                    );
+                                    indicator.hide();
+                                    new Notice("✅ Summary added!");
+                                } catch (error) {
+                                    indicator.hide();
+                                    new Notice("❌ Error generating summary");
+                                    console.error(error);
+                                }
+                            });
+                    });
+                }
+            })
         );
     }
 
@@ -540,6 +647,31 @@ export default class AIPoweredSecondBrain extends Plugin {
         
         if (leaf) {
             workspace.revealLeaf(leaf);
+        }
+    }
+
+    async callAIWithHistory(messages: ChatMessage[]): Promise<string> {
+        if (this.settings.useOllama) {
+            // For Ollama, we'll format the conversation history into a prompt
+            const formattedHistory = messages
+                .map(msg => `${msg.role.toUpperCase()}: ${msg.content}`)
+                .join("\n\n");
+            return await this.callOllama(formattedHistory, "Continue the conversation naturally.");
+        } else {
+            // For OpenAI, we can use the chat format directly
+            const response = await fetch("https://api.openai.com/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${this.settings.openaiApiKey}`,
+                },
+                body: JSON.stringify({
+                    model: "gpt-4-mini",
+                    messages: messages,
+                }),
+            });
+            const data = await response.json();
+            return data.choices[0].message.content.trim();
         }
     }
 }
