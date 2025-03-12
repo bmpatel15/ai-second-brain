@@ -13,6 +13,7 @@ interface AIPoweredSecondBrainSettings {
     ollamaModel: string;
     embeddingCache: EmbeddingCache;
     aiProvider: "openai" | "ollama";
+    openaiModel: string;
 }
 
 interface NoteEmbedding {
@@ -32,7 +33,8 @@ const DEFAULT_SETTINGS: AIPoweredSecondBrainSettings = {
     ollamaEndpoint: "http://localhost:11434",
     ollamaModel: "mistral",
     embeddingCache: { embeddings: [], version: "1.0" },
-    aiProvider: "openai"
+    aiProvider: "openai",
+    openaiModel: "gpt-4o-mini"
 };
 
 interface ChatMessage {
@@ -122,6 +124,10 @@ class AIChatView extends ItemView {
     private inputContainer: HTMLElement;
     private plugin: AIPoweredSecondBrain;
     private chatHistory: ChatMessage[] = [];
+    private sessionStats: HTMLElement;
+    private sessionCost = 0;
+    private sessionInputTokens = 0;
+    private sessionOutputTokens = 0;
 
     constructor(leaf: WorkspaceLeaf, plugin: AIPoweredSecondBrain) {
         super(leaf);
@@ -146,6 +152,15 @@ class AIChatView extends ItemView {
 
         // Create main chat interface
         this.contentEl = container.createEl("div", { cls: "ai-chat-container" });
+        
+        // Create session stats container
+        this.sessionStats = this.contentEl.createEl("div", {
+            cls: "session-stats",
+            attr: {
+                style: "padding: 8px; border-bottom: 1px solid var(--background-modifier-border); font-size: 0.8em; opacity: 0.8;"
+            }
+        });
+        this.updateSessionStats();
         
         // Create chat messages container
         this.chatContainer = this.contentEl.createEl("div", { cls: "chat-messages" });
@@ -211,6 +226,10 @@ class AIChatView extends ItemView {
         });
     }
 
+    private updateSessionStats() {
+        this.sessionStats.innerHTML = `Session Stats: 💰 $${this.sessionCost.toFixed(4)} | 📥 ${this.sessionInputTokens} input tokens | 📤 ${this.sessionOutputTokens} output tokens`;
+    }
+
     private async handleUserInput(input: string) {
         this.addChatMessage("user", input);
         this.chatHistory.push({ role: "user", content: input });
@@ -225,20 +244,17 @@ class AIChatView extends ItemView {
             const indicator = this.showTypingIndicator();
             const content = await this.app.vault.read(activeFile);
             
-            // Add current note context to the conversation
             this.chatHistory.push({
                 role: "system",
                 content: `Current note content:\n${content}`
             });
 
-            const response = await this.plugin.callAIWithHistory(this.chatHistory);
+            const response = await this.plugin.callAIWithHistory(this.chatHistory, this);
             this.removeTypingIndicator(indicator);
             
-            // Add AI's response to history
             this.chatHistory.push({ role: "assistant", content: response });
             this.addChatMessage("assistant", response);
 
-            // Remove the note content from history to keep it clean
             this.chatHistory = this.chatHistory.filter(msg => 
                 msg.role !== "system" || 
                 !msg.content.startsWith("Current note content:")
@@ -277,7 +293,7 @@ class AIChatView extends ItemView {
         
         try {
             const content = await this.app.vault.read(activeFile);
-            const summary = await this.plugin.callAI(content, "Summarize this note in 3-5 bullet points");
+            const summary = await this.plugin.callAI(content, "Summarize this note in 3-5 bullet points", this);
             this.removeTypingIndicator(indicator);
             this.addChatMessage("assistant", summary);
         } catch (error) {
@@ -305,7 +321,8 @@ class AIChatView extends ItemView {
                 "1. Main themes and concepts\n" +
                 "2. Key arguments or points\n" +
                 "3. Potential areas for expansion\n" +
-                "4. Questions to consider"
+                "4. Questions to consider",
+                this
             );
             this.removeTypingIndicator(indicator);
             this.addChatMessage("assistant", analysis);
@@ -328,7 +345,7 @@ class AIChatView extends ItemView {
 
         try {
             // Force update embedding for current note
-            await this.plugin.updateNoteEmbedding(activeFile);
+            await this.plugin.updateNoteEmbedding(activeFile, this);
             
             const currentEmbedding = this.plugin.settings.embeddingCache.embeddings
                 .find(e => e.path === activeFile.path)?.embedding;
@@ -360,13 +377,21 @@ class AIChatView extends ItemView {
 
             // Get explanations for top matches
             let response = "**Related Notes Found:**\n\n";
+            const currentContent = await this.app.vault.read(activeFile);
+            const currentTitle = activeFile.basename;
+            
             for (const { path, similarity } of similarities) {
                 const file = this.app.vault.getAbstractFileByPath(path);
                 if (file instanceof TFile) {
                     const content = await this.app.vault.read(file);
+                    // Extract first 100 words of each note for comparison
+                    const currentExcerpt = currentContent.split(/\s+/).slice(0, 100).join(" ");
+                    const relatedExcerpt = content.split(/\s+/).slice(0, 100).join(" ");
+                    
                     const explanation = await this.plugin.callAI(
-                        `Note 1:\n${await this.app.vault.read(activeFile)}\n\nNote 2:\n${content}`,
-                        "Explain in one sentence why these notes are related:"
+                        `Compare these notes:\n1. "${currentTitle}": ${currentExcerpt}\n2. "${file.basename}": ${relatedExcerpt}`,
+                        "In one brief sentence, explain the key connection between these notes:",
+                        this
                     );
                     
                     const percentage = Math.round(similarity * 100);
@@ -427,11 +452,23 @@ class AIChatView extends ItemView {
         this.chatContainer.empty();
         new Notice("Chat history has been cleared");
     }
+
+    public updateCostAndTokens(cost: number, inputTokens: number, outputTokens: number) {
+        this.sessionCost += cost;
+        this.sessionInputTokens += inputTokens;
+        this.sessionOutputTokens += outputTokens;
+        this.updateSessionStats();
+    }
 }
 
 export default class AIPoweredSecondBrain extends Plugin {
     settings: AIPoweredSecondBrainSettings;
     private openai: OpenAI;
+
+    private pricing: Record<string, { input: number; output: number }> = {
+        "gpt-4o-mini": { input: 0.0025, output: 0.0075 },
+        "text-embedding-ada-002": { input: 0.0001, output: 0.0 }, // $0.0001 per 1K tokens
+    };
 
     async loadSettings() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -573,7 +610,11 @@ export default class AIPoweredSecondBrain extends Plugin {
         try {
             new Notice("🤔 Generating summary...");
             const content = await this.app.vault.read(activeFile);
-            const summary = await this.callAI(content, "Summarize this note in 3 bullet points");
+            
+            // Get the chat view if it exists
+            const chatView = this.app.workspace.getLeavesOfType("ai-chat-view")[0]?.view as AIChatView;
+            
+            const summary = await this.callAI(content, "Summarize this note in 3 bullet points", chatView);
             const updatedContent = `${content}\n\n---\n**AI Summary:**\n${summary}`;
             await this.app.vault.modify(activeFile, updatedContent);
             new Notice("✅ Summary added to the note!");
@@ -583,24 +624,25 @@ export default class AIPoweredSecondBrain extends Plugin {
         }
     }
 
-    async callAI(inputText: string, prompt: string): Promise<string> {
+    async callAI(inputText: string, prompt: string, chatView?: AIChatView): Promise<string> {
         switch (this.settings.aiProvider) {
             case "ollama":
                 return await this.callOllama(inputText, prompt);
             case "openai":
-                return await this.callOpenAI(inputText, prompt);
+                return await this.callOpenAI(inputText, prompt, chatView);
             default:
                 throw new Error("Invalid AI provider");
         }
     }
 
-    private async callOpenAI(inputText: string, prompt: string): Promise<string> {
+    private async callOpenAI(inputText: string, prompt: string, chatView?: AIChatView): Promise<string> {
         const apiKey = this.settings.openaiApiKey;
         if (!apiKey) {
             new Notice("❌ Error: OpenAI API key is missing! Enter it in settings.");
             return "Error: API key not found.";
         }
 
+        const model = this.settings.openaiModel || "gpt-4o-mini";
         const response = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -608,11 +650,24 @@ export default class AIPoweredSecondBrain extends Plugin {
                 "Authorization": `Bearer ${apiKey}`,
             },
             body: JSON.stringify({
-                model: "gpt-4o-mini",
+                model: model,
                 messages: [{ role: "system", content: prompt }, { role: "user", content: inputText }],
             }),
         });
         const data = await response.json();
+        
+        // Calculate cost
+        const inputTokens = data.usage.prompt_tokens;
+        const outputTokens = data.usage.completion_tokens;
+        const inputCost = (inputTokens / 1000) * this.pricing[model].input;
+        const outputCost = (outputTokens / 1000) * this.pricing[model].output;
+        const totalCost = inputCost + outputCost;
+        
+        // Update session stats if chatView is provided
+        if (chatView) {
+            chatView.updateCostAndTokens(totalCost, inputTokens, outputTokens);
+        }
+        
         return data.choices[0].message.content.trim();
     }
 
@@ -664,29 +719,29 @@ export default class AIPoweredSecondBrain extends Plugin {
         }
     }
 
-    async callAIWithHistory(messages: ChatMessage[]): Promise<string> {
+    async callAIWithHistory(messages: ChatMessage[], chatView: AIChatView): Promise<string> {
         switch (this.settings.aiProvider) {
             case "ollama":
                 return await this.callOllama(messages.map(msg => msg.content).join("\n\n"), "Continue the conversation naturally.");
             case "openai":
-                return await this.callOpenAI(messages.map(msg => msg.content).join("\n\n"), "Continue the conversation naturally.");
+                return await this.callOpenAI(messages.map(msg => msg.content).join("\n\n"), "Continue the conversation naturally.", chatView);
             default:
                 throw new Error("Invalid AI provider");
         }
     }
 
-    public async getEmbedding(text: string): Promise<number[]> {
+    public async getEmbedding(text: string, chatView?: AIChatView): Promise<number[]> {
         switch (this.settings.aiProvider) {
             case "ollama":
                 return await this.getOllamaEmbedding(text);
             case "openai":
-                return await this.getOpenAIEmbedding(text);
+                return await this.getOpenAIEmbedding(text, chatView);
             default:
                 throw new Error("Invalid AI provider");
         }
     }
 
-    private async getOpenAIEmbedding(text: string): Promise<number[]> {
+    private async getOpenAIEmbedding(text: string, chatView?: AIChatView): Promise<number[]> {
         const response = await fetch("https://api.openai.com/v1/embeddings", {
             method: "POST",
             headers: {
@@ -699,6 +754,13 @@ export default class AIPoweredSecondBrain extends Plugin {
             }),
         });
         const data = await response.json();
+        
+        // Calculate embedding cost if chatView is provided
+        if (chatView && data.usage?.total_tokens) {
+            const cost = (data.usage.total_tokens / 1000) * this.pricing["text-embedding-ada-002"].input;
+            chatView.updateCostAndTokens(cost, data.usage.total_tokens, 0);
+        }
+        
         return data.data[0].embedding;
     }
 
@@ -717,9 +779,9 @@ export default class AIPoweredSecondBrain extends Plugin {
         return data.embedding;
     }
 
-    public async updateNoteEmbedding(file: TFile): Promise<void> {
+    public async updateNoteEmbedding(file: TFile, chatView?: AIChatView): Promise<void> {
         const content = await this.app.vault.read(file);
-        const embedding = await this.getEmbedding(content);
+        const embedding = await this.getEmbedding(content, chatView);
         
         const existingIndex = this.settings.embeddingCache.embeddings
             .findIndex(e => e.path === file.path);
@@ -748,7 +810,7 @@ export default class AIPoweredSecondBrain extends Plugin {
         return dotProduct / (magnitudeA * magnitudeB);
     }
 
-    public async updateAllEmbeddings() {
+    public async updateAllEmbeddings(chatView?: AIChatView) {
         const files = this.app.vault.getMarkdownFiles();
         const indicator = new Notice("Computing note embeddings...", 0);
         
@@ -757,7 +819,7 @@ export default class AIPoweredSecondBrain extends Plugin {
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
                 try {
-                    await this.updateNoteEmbedding(file);
+                    await this.updateNoteEmbedding(file, chatView);
                     console.log(`Processed ${file.path}`);
                     indicator.setMessage(`Computing embeddings: ${i + 1}/${files.length}`);
                 } catch (error) {
