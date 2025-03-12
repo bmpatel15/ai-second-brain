@@ -1,4 +1,4 @@
-# AI-Powered Second Brain for Obsidian
+# AI-Powered Second Brain
 
 An intelligent assistant for your Obsidian notes that helps you analyze, summarize, and connect your thoughts using AI. Works with both OpenAI and local LLMs (via Ollama).
 
