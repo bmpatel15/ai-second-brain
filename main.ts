@@ -11,13 +11,28 @@ interface AIPoweredSecondBrainSettings {
     useOllama: boolean;
     ollamaEndpoint: string;
     ollamaModel: string;
+    embeddingCache: EmbeddingCache;
+    aiProvider: "openai" | "ollama";
+}
+
+interface NoteEmbedding {
+    path: string;
+    embedding: number[];
+    lastModified: number;
+}
+
+interface EmbeddingCache {
+    embeddings: NoteEmbedding[];
+    version: string;
 }
 
 const DEFAULT_SETTINGS: AIPoweredSecondBrainSettings = {
-    openaiApiKey: "", // Empty by default
+    openaiApiKey: "",
     useOllama: false,
     ollamaEndpoint: "http://localhost:11434",
-    ollamaModel: "mistral"
+    ollamaModel: "mistral",
+    embeddingCache: { embeddings: [], version: "1.0" },
+    aiProvider: "openai"
 };
 
 interface ChatMessage {
@@ -39,18 +54,19 @@ class AIPoweredSecondBrainSettingTab extends PluginSettingTab {
         containerEl.createEl("h2", { text: "AI Summary Settings" });
 
         new Setting(containerEl)
-            .setName("Use Local LLM (Ollama)")
-            .setDesc("Toggle between OpenAI and local Ollama LLM")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.useOllama)
+            .setName("AI Provider")
+            .setDesc("Choose your AI provider")
+            .addDropdown(dropdown => dropdown
+                .addOption("openai", "OpenAI API")
+                .addOption("ollama", "Local LLM (Ollama)")
+                .setValue(this.plugin.settings.aiProvider)
                 .onChange(async (value) => {
-                    this.plugin.settings.useOllama = value;
+                    this.plugin.settings.aiProvider = value as "openai" | "ollama";
                     await this.plugin.saveSettings();
-                    // Trigger refresh of displayed settings
                     this.display();
                 }));
 
-        if (this.plugin.settings.useOllama) {
+        if (this.plugin.settings.aiProvider === "ollama") {
             new Setting(containerEl)
                 .setName("Ollama Endpoint")
                 .setDesc("URL of your Ollama instance (default: http://localhost:11434)")
@@ -84,6 +100,19 @@ class AIPoweredSecondBrainSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     }));
         }
+
+        new Setting(containerEl)
+            .setName("Rebuild Embeddings Cache")
+            .setDesc("Recompute embeddings for all notes (useful if related notes aren't working)")
+            .addButton(button => button
+                .setButtonText("Rebuild Cache")
+                .onClick(async () => {
+                    new Notice("Starting to rebuild embeddings cache...");
+                    this.plugin.settings.embeddingCache.embeddings = [];
+                    await this.plugin.saveSettings();
+                    await this.plugin.updateAllEmbeddings();
+                    new Notice("✅ Embeddings cache rebuilt!");
+                }));
     }
 }
 
@@ -298,90 +327,60 @@ class AIChatView extends ItemView {
         const indicator = this.showTypingIndicator();
 
         try {
-            const currentContent = await this.app.vault.read(activeFile);
-            const files = this.app.vault.getMarkdownFiles().filter(f => f.path !== activeFile.path);
-            const relatedNotes: Array<{ file: TFile; similarity: number; excerpt: string }> = [];
-
-            // Simplified prompt for Ollama
-            const ollamaPrompt = `Compare these two notes and respond with two lines:
-1. A similarity score from 0.0 to 1.0
-2. A brief excerpt showing why they are related
-Format exactly like this:
-SCORE: 0.8
-EXCERPT: relevant text here`;
-
-            // More detailed prompt for OpenAI
-            const openAIPrompt = `You are a semantic similarity analyzer. Rate how related the following note is to the reference note on a scale of 0 to 1, where 1 means highly related and 0 means completely unrelated. Also extract a relevant excerpt that shows the relationship. Return the response in format: "SCORE: {number}\nEXCERPT: {relevant excerpt}"`;
-
-            // Process files in batches of 5
-            const BATCH_SIZE = 5;
-            for (let i = 0; i < files.length; i += BATCH_SIZE) {
-                const batch = files.slice(i, i + BATCH_SIZE);
+            // Force update embedding for current note
+            await this.plugin.updateNoteEmbedding(activeFile);
+            
+            const currentEmbedding = this.plugin.settings.embeddingCache.embeddings
+                .find(e => e.path === activeFile.path)?.embedding;
                 
-                // Process batch in parallel
-                const batchPromises = batch.map(async (file) => {
-                    const content = await this.app.vault.read(file);
-                    const prompt = this.plugin.settings.useOllama ? ollamaPrompt : openAIPrompt;
-                    
-                    const inputText = this.plugin.settings.useOllama ? 
-                        `Note 1:\n${currentContent}\n\nNote 2:\n${content}` :
-                        `Reference Note:\n${currentContent}\n\nNote to Compare:\n${content}`;
-
-                    try {
-                        const analysis = await this.plugin.callAI(inputText, prompt);
-                        const scoreMatch = analysis.match(/SCORE:\s*(0?\.\d+)/);
-                        const excerptMatch = analysis.match(/EXCERPT:\s*([\s\S]*?)(?:\n|$)/);
-
-                        if (scoreMatch && excerptMatch) {
-                            const similarity = parseFloat(scoreMatch[1]);
-                            const excerpt = excerptMatch[1].trim();
-
-                            if (similarity > 0.5) {
-                                return {
-                                    file,
-                                    similarity,
-                                    excerpt
-                                };
-                            }
-                        }
-                    } catch (error) {
-                        console.error(`Error processing file ${file.path}:`, error);
-                    }
-                    return null;
-                });
-
-                // Wait for current batch to complete
-                const batchResults = await Promise.all(batchPromises);
-                relatedNotes.push(...batchResults.filter((result): result is NonNullable<typeof result> => result !== null));
-
-                // Update progress message every batch
-                const progress = Math.min(100, Math.round((i + BATCH_SIZE) / files.length * 100));
-                this.updateTypingIndicator(indicator, `Analyzing notes... ${progress}%`);
+            if (!currentEmbedding) {
+                throw new Error("Failed to generate embedding for current note");
             }
 
-            // Sort by similarity
-            relatedNotes.sort((a, b) => b.similarity - a.similarity);
+            console.log(`Current note: ${activeFile.path}`);
+            console.log(`Cache size: ${this.plugin.settings.embeddingCache.embeddings.length}`);
 
-            // Display results
-            if (relatedNotes.length === 0) {
+            // Find similar notes using cosine similarity
+            const similarities = this.plugin.settings.embeddingCache.embeddings
+                .filter(e => e.path !== activeFile.path)
+                .map(e => ({
+                    path: e.path,
+                    similarity: this.plugin.cosineSimilarity(currentEmbedding, e.embedding)
+                }))
+                .sort((a, b) => b.similarity - a.similarity)
+                .slice(0, 5); // Get top 5 matches
+
+            console.log("Found similarities:", similarities);
+
+            if (similarities.length === 0) {
                 this.removeTypingIndicator(indicator);
-                this.addChatMessage("assistant", "No significantly related notes found.");
+                this.addChatMessage("assistant", "No related notes found. Try updating the embeddings cache in settings.");
                 return;
             }
 
+            // Get explanations for top matches
             let response = "**Related Notes Found:**\n\n";
-            for (const { file, similarity, excerpt } of relatedNotes.slice(0, 5)) {
-                const percentage = Math.round(similarity * 100);
-                response += `### [[${file.path}]] (${percentage}% related)\n`;
-                response += `> ${excerpt}\n\n`;
+            for (const { path, similarity } of similarities) {
+                const file = this.app.vault.getAbstractFileByPath(path);
+                if (file instanceof TFile) {
+                    const content = await this.app.vault.read(file);
+                    const explanation = await this.plugin.callAI(
+                        `Note 1:\n${await this.app.vault.read(activeFile)}\n\nNote 2:\n${content}`,
+                        "Explain in one sentence why these notes are related:"
+                    );
+                    
+                    const percentage = Math.round(similarity * 100);
+                    response += `### [[${path}]] (${percentage}% related)\n`;
+                    response += `> ${explanation}\n\n`;
+                }
             }
 
             this.removeTypingIndicator(indicator);
             this.addChatMessage("assistant", response);
 
         } catch (error) {
-            this.removeTypingIndicator(indicator);
             console.error("Error finding related notes:", error);
+            this.removeTypingIndicator(indicator);
             this.addChatMessage("assistant", "Error finding related notes. Check console for details.");
         }
     }
@@ -550,6 +549,18 @@ export default class AIPoweredSecondBrain extends Plugin {
                 }
             })
         );
+
+        // Register file modification handler
+        this.registerEvent(
+            this.app.vault.on("modify", async (file) => {
+                if (file instanceof TFile && file.extension === "md") {
+                    await this.updateNoteEmbedding(file);
+                }
+            })
+        );
+
+        // Initial embedding computation
+        await this.updateAllEmbeddings();
     }
 
     async summarizeNote() {
@@ -573,10 +584,13 @@ export default class AIPoweredSecondBrain extends Plugin {
     }
 
     async callAI(inputText: string, prompt: string): Promise<string> {
-        if (this.settings.useOllama) {
-            return await this.callOllama(inputText, prompt);
-        } else {
-            return await this.callOpenAI(inputText, prompt);
+        switch (this.settings.aiProvider) {
+            case "ollama":
+                return await this.callOllama(inputText, prompt);
+            case "openai":
+                return await this.callOpenAI(inputText, prompt);
+            default:
+                throw new Error("Invalid AI provider");
         }
     }
 
@@ -651,27 +665,111 @@ export default class AIPoweredSecondBrain extends Plugin {
     }
 
     async callAIWithHistory(messages: ChatMessage[]): Promise<string> {
-        if (this.settings.useOllama) {
-            // For Ollama, we'll format the conversation history into a prompt
-            const formattedHistory = messages
-                .map(msg => `${msg.role.toUpperCase()}: ${msg.content}`)
-                .join("\n\n");
-            return await this.callOllama(formattedHistory, "Continue the conversation naturally.");
+        switch (this.settings.aiProvider) {
+            case "ollama":
+                return await this.callOllama(messages.map(msg => msg.content).join("\n\n"), "Continue the conversation naturally.");
+            case "openai":
+                return await this.callOpenAI(messages.map(msg => msg.content).join("\n\n"), "Continue the conversation naturally.");
+            default:
+                throw new Error("Invalid AI provider");
+        }
+    }
+
+    public async getEmbedding(text: string): Promise<number[]> {
+        switch (this.settings.aiProvider) {
+            case "ollama":
+                return await this.getOllamaEmbedding(text);
+            case "openai":
+                return await this.getOpenAIEmbedding(text);
+            default:
+                throw new Error("Invalid AI provider");
+        }
+    }
+
+    private async getOpenAIEmbedding(text: string): Promise<number[]> {
+        const response = await fetch("https://api.openai.com/v1/embeddings", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${this.settings.openaiApiKey}`,
+            },
+            body: JSON.stringify({
+                model: "text-embedding-ada-002",
+                input: text
+            }),
+        });
+        const data = await response.json();
+        return data.data[0].embedding;
+    }
+
+    private async getOllamaEmbedding(text: string): Promise<number[]> {
+        const response = await fetch(`${this.settings.ollamaEndpoint}/api/embeddings`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                model: this.settings.ollamaModel,
+                prompt: text
+            }),
+        });
+        const data = await response.json();
+        return data.embedding;
+    }
+
+    public async updateNoteEmbedding(file: TFile): Promise<void> {
+        const content = await this.app.vault.read(file);
+        const embedding = await this.getEmbedding(content);
+        
+        const existingIndex = this.settings.embeddingCache.embeddings
+            .findIndex(e => e.path === file.path);
+        
+        if (existingIndex !== -1) {
+            this.settings.embeddingCache.embeddings[existingIndex] = {
+                path: file.path,
+                embedding: embedding,
+                lastModified: file.stat.mtime
+            };
         } else {
-            // For OpenAI, we can use the chat format directly
-            const response = await fetch("https://api.openai.com/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${this.settings.openaiApiKey}`,
-                },
-                body: JSON.stringify({
-                    model: "gpt-4-mini",
-                    messages: messages,
-                }),
+            this.settings.embeddingCache.embeddings.push({
+                path: file.path,
+                embedding: embedding,
+                lastModified: file.stat.mtime
             });
-            const data = await response.json();
-            return data.choices[0].message.content.trim();
+        }
+        
+        await this.saveSettings();
+    }
+
+    public cosineSimilarity(a: number[], b: number[]): number {
+        const dotProduct = a.reduce((sum, val, i) => sum + val * b[i], 0);
+        const magnitudeA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
+        const magnitudeB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
+        return dotProduct / (magnitudeA * magnitudeB);
+    }
+
+    public async updateAllEmbeddings() {
+        const files = this.app.vault.getMarkdownFiles();
+        const indicator = new Notice("Computing note embeddings...", 0);
+        
+        try {
+            console.log(`Starting to compute embeddings for ${files.length} files`);
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                try {
+                    await this.updateNoteEmbedding(file);
+                    console.log(`Processed ${file.path}`);
+                    indicator.setMessage(`Computing embeddings: ${i + 1}/${files.length}`);
+                } catch (error) {
+                    console.error(`Error processing ${file.path}:`, error);
+                }
+            }
+            
+            console.log(`Finished computing embeddings. Cache size: ${this.settings.embeddingCache.embeddings.length}`);
+        } catch (error) {
+            console.error("Error in updateAllEmbeddings:", error);
+        } finally {
+            indicator.hide();
         }
     }
 }
