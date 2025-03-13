@@ -150,3 +150,40 @@ If your plugin does not need CSS, delete this file.
     color: var(--text-normal);
     cursor: pointer;
 }
+
+.question-templates {
+    border-bottom: 1px solid var(--background-modifier-border);
+    padding-bottom: 8px;
+    margin-bottom: 8px;
+}
+
+.question-template-button {
+    transition: all 0.2s ease;
+}
+
+.question-template-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.message-actions {
+    opacity: 0.7;
+    transition: opacity 0.2s ease;
+}
+
+.chat-message:hover .message-actions {
+    opacity: 1;
+}
+
+.insert-response-button {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.insert-response-button:hover {
+    filter: brightness(1.1);
+}

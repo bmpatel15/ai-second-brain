@@ -2,7 +2,7 @@
  * Obsidian AI-Powered Second Brain Plugin
  * - Features: AI-powered note linking, summarization, writing assistant.
  */
-import { Plugin, Notice, PluginSettingTab, App, Setting, TFile } from "obsidian";
+import { Plugin, Notice, PluginSettingTab, App, Setting, TFile, MarkdownView, Editor } from "obsidian";
 import OpenAI from "openai";
 import { ItemView, WorkspaceLeaf, MarkdownRenderer } from "obsidian";
 
@@ -168,6 +168,38 @@ class AIChatView extends ItemView {
         // Create input container
         this.inputContainer = this.contentEl.createEl("div", { cls: "chat-input-container" });
         
+        // Create quick question templates
+        const questionTemplates = this.inputContainer.createEl("div", { 
+            cls: "question-templates",
+            attr: { style: "display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;" }
+        });
+        
+        const templates = [
+            { text: "📝 Key Takeaways", prompt: "What are the key takeaways from this note?" },
+            { text: "✅ Action Items", prompt: "List all action items or tasks mentioned in this note." },
+            { text: "🤔 Main Arguments", prompt: "What are the main arguments or points made in this note?" },
+            { text: "⚖️ Counterpoints", prompt: "What are potential counterpoints to the main arguments in this note?" },
+            { text: "🔍 Deep Analysis", prompt: "Provide a deep analysis of this note's content, including themes, implications, and potential gaps." }
+        ];
+        
+        templates.forEach(template => {
+            const button = questionTemplates.createEl("button", {
+                text: template.text,
+                cls: "question-template-button",
+                attr: {
+                    style: "font-size: 0.8em; padding: 4px 8px; border-radius: 4px; background: var(--interactive-accent); color: var(--text-on-accent);"
+                }
+            });
+            
+            button.addEventListener("click", () => {
+                const textarea = this.inputContainer.querySelector(".chat-input") as HTMLTextAreaElement;
+                if (textarea) {
+                    textarea.value = template.prompt;
+                    textarea.focus();
+                }
+            });
+        });
+        
         // Create quick action buttons container with a specific class
         const buttonContainer = this.inputContainer.createEl("div", { 
             cls: "quick-actions",
@@ -273,6 +305,25 @@ class AIChatView extends ItemView {
 
         // Render markdown content
         MarkdownRenderer.renderMarkdown(content, messageEl, "", this.plugin);
+        
+        // Add insert button for assistant messages
+        if (role === "assistant") {
+            const buttonContainer = messageEl.createEl("div", {
+                cls: "message-actions",
+                attr: { style: "margin-top: 8px;" }
+            });
+            
+            const insertButton = buttonContainer.createEl("button", {
+                text: "📝 Insert into Note",
+                cls: "insert-response-button",
+                attr: { style: "font-size: 0.8em; padding: 4px 8px;" }
+            });
+            
+            insertButton.addEventListener("click", () => {
+                this.insertResponseIntoNote(content);
+                new Notice("✅ Response inserted into note!");
+            });
+        }
         
         // Scroll to bottom
         this.chatContainer.scrollTo({
@@ -458,6 +509,20 @@ class AIChatView extends ItemView {
         this.sessionInputTokens += inputTokens;
         this.sessionOutputTokens += outputTokens;
         this.updateSessionStats();
+    }
+
+    private async insertResponseIntoNote(response: string) {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile) return;
+        
+        const editor: Editor | undefined = this.app.workspace.getActiveViewOfType(MarkdownView)?.editor;
+        if (!editor) return;
+        
+        const formattedResponse = `\n\n---\n**AI Response:**\n${response}\n---\n`;
+        
+        // Insert at cursor position or at the end
+        const cursor = editor.getCursor();
+        editor.replaceRange(formattedResponse, cursor);
     }
 }
 
