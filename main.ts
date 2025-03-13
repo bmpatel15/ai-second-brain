@@ -520,9 +520,13 @@ class AIChatView extends ItemView {
         
         const formattedResponse = `\n\n---\n**AI Response:**\n${response}\n---\n`;
         
-        // Insert at cursor position or at the end
-        const cursor = editor.getCursor();
-        editor.replaceRange(formattedResponse, cursor);
+        // Always append to the end of the note
+        const endPosition = {
+            line: editor.lineCount(),
+            ch: 0
+        };
+        
+        editor.replaceRange(formattedResponse, endPosition);
     }
 }
 
