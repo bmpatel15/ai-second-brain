@@ -2,7 +2,7 @@
  * Obsidian AI-Powered Second Brain Plugin
  * - Features: AI-powered note linking, summarization, writing assistant.
  */
-import { Plugin, Notice, PluginSettingTab, App, Setting, TFile, Editor } from "obsidian";
+import { Plugin, Notice, PluginSettingTab, App, Setting, TFile, Editor, Modal } from "obsidian";
 import OpenAI from "openai";
 import { ItemView, WorkspaceLeaf, MarkdownRenderer } from "obsidian";
 
@@ -14,6 +14,7 @@ interface AIPoweredSecondBrainSettings {
     embeddingCache: EmbeddingCache;
     aiProvider: "openai" | "ollama";
     openaiModel: string;
+    autoTagging: boolean;
 }
 
 interface NoteEmbedding {
@@ -34,12 +35,18 @@ const DEFAULT_SETTINGS: AIPoweredSecondBrainSettings = {
     ollamaModel: "mistral",
     embeddingCache: { embeddings: [], version: "1.0" },
     aiProvider: "openai",
-    openaiModel: "gpt-4o-mini"
+    openaiModel: "gpt-4o-mini",
+    autoTagging: true,
 };
 
 interface ChatMessage {
     role: "user" | "assistant" | "system";
     content: string;
+}
+
+interface SummaryFormat {
+    type: 'short' | 'medium' | 'detailed';
+    prompt: string;
 }
 
 class AIPoweredSecondBrainSettingTab extends PluginSettingTab {
@@ -555,6 +562,21 @@ export default class AIPoweredSecondBrain extends Plugin {
         "text-embedding-ada-002": { input: 0.0001, output: 0.0 }, // $0.0001 per 1K tokens
     };
 
+    private readonly summaryFormats: Record<string, SummaryFormat> = {
+        short: {
+            type: 'short',
+            prompt: "Summarize this text in one to two concise sentences, preserving the key message."
+        },
+        medium: {
+            type: 'medium',
+            prompt: "Summarize this text in 3-5 clear bullet points, capturing the main ideas."
+        },
+        detailed: {
+            type: 'detailed',
+            prompt: "Provide a structured breakdown of this text including:\n- Core Idea\n- Key Points\n- Supporting Details\n- Conclusions/Implications"
+        }
+    };
+
     async loadSettings() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     }
@@ -616,61 +638,8 @@ export default class AIPoweredSecondBrain extends Plugin {
             (leaf) => new AIChatView(leaf, this)
         );
 
-        // Add editor menu item (appears when text is selected)
-        this.registerEvent(
-            this.app.workspace.on("editor-menu", (menu, editor: Editor) => {
-                const selection = editor.getSelection();
-                if (selection) {
-                    // Add "Summarize and Replace" option
-                    menu.addItem((item) => {
-                        item
-                            .setTitle("Replace with Summary")
-                            .setIcon("replace")
-                            .onClick(async () => {
-                                const indicator = new Notice("🤔 Summarizing...");
-                                try {
-                                    const summary = await this.callAI(
-                                        selection,
-                                        "Summarize this text concisely in 1-2 sentences, preserving key information."
-                                    );
-                                    editor.replaceSelection(`${summary}`);
-                                    indicator.hide();
-                                    new Notice("✅ Summary added!");
-                                } catch (error) {
-                                    indicator.hide();
-                                    new Notice("❌ Error generating summary");
-                                    console.error(error);
-                                }
-                            });
-                    });
-
-                    // Add "Append Summary" option
-                    menu.addItem((item) => {
-                        item
-                            .setTitle("Append Summary")
-                            .setIcon("brain")
-                            .onClick(async () => {
-                                const indicator = new Notice("🤔 Summarizing...");
-                                try {
-                                    const summary = await this.callAI(
-                                        selection,
-                                        "Summarize this text concisely in 1-2 sentences, preserving key information."
-                                    );
-                                    editor.replaceSelection(
-                                        `${selection}\n\n> [!summary]- AI Summary\n> ${summary}\n\n`
-                                    );
-                                    indicator.hide();
-                                    new Notice("✅ Summary added!");
-                                } catch (error) {
-                                    indicator.hide();
-                                    new Notice("❌ Error generating summary");
-                                    console.error(error);
-                                }
-                            });
-                    });
-                }
-            })
-        );
+        // Register editor menu items
+        this.registerEditorMenuItems();
 
         // Register file modification handler
         this.registerEvent(
@@ -918,5 +887,157 @@ export default class AIPoweredSecondBrain extends Plugin {
         } finally {
             indicator.hide();
         }
+    }
+
+    private registerEditorMenuItems() {
+        this.registerEvent(
+            this.app.workspace.on("editor-menu", (menu, editor: Editor) => {
+                const selection = editor.getSelection();
+                if (selection) {
+                    // Short summary
+                    menu.addItem((item) => {
+                        item
+                            .setTitle("🤖 Short Summary")
+                            .setIcon("align-justify")
+                            .onClick(async () => {
+                                await this.insertSummary(editor, selection, 'short');
+                            });
+                    });
+
+                    // Medium summary
+                    menu.addItem((item) => {
+                        item
+                            .setTitle("📝 Medium Summary")
+                            .setIcon("list")
+                            .onClick(async () => {
+                                await this.insertSummary(editor, selection, 'medium');
+                            });
+                    });
+
+                    // Detailed summary
+                    menu.addItem((item) => {
+                        item
+                            .setTitle("📚 Detailed Summary")
+                            .setIcon("layers")
+                            .onClick(async () => {
+                                await this.insertSummary(editor, selection, 'detailed');
+                            });
+                    });
+
+                    // Add auto-tagging option
+                    menu.addItem((item) => {
+                        item
+                            .setTitle("🏷️ Suggest Tags")
+                            .setIcon("tag")
+                            .onClick(async () => {
+                                await this.insertTags(editor, selection);
+                            });
+                    });
+                }
+            })
+        );
+    }
+
+    private async insertSummary(editor: Editor, text: string, format: 'short' | 'medium' | 'detailed') {
+        const indicator = new Notice("🤔 Generating summary...");
+        try {
+            // Get the chat view for cost tracking
+            const chatView = this.app.workspace.getLeavesOfType("ai-chat-view")[0]?.view as AIChatView;
+            const summary = await this.generateSummary(text, format, chatView);
+            editor.replaceSelection(
+                `${text}\n\n> [!summary]- AI ${format} Summary\n> ${summary}\n\n`
+            );
+            indicator.hide();
+            new Notice("✅ Summary added!");
+        } catch (error) {
+            indicator.hide();
+            new Notice("❌ Error generating summary");
+            console.error(error);
+        }
+    }
+
+    private async insertTags(editor: Editor, text: string) {
+        const indicator = new Notice("🤔 Analyzing content for tags...");
+        try {
+            // Get the chat view for cost tracking
+            const chatView = this.app.workspace.getLeavesOfType("ai-chat-view")[0]?.view as AIChatView;
+            const suggestedTags = await this.suggestTags(text, chatView);
+            
+            // Create a modal for tag selection
+            const modal = new TagSelectionModal(this.app, suggestedTags, (selectedTags) => {
+                if (selectedTags.length > 0) {
+                    const tagString = selectedTags.map(tag => `#${tag}`).join(' ');
+                    editor.replaceSelection(`${text}\n\nTags: ${tagString}\n`);
+                    new Notice("✅ Tags added!");
+                }
+            });
+            
+            modal.open();
+            indicator.hide();
+        } catch (error) {
+            indicator.hide();
+            new Notice("❌ Error suggesting tags");
+            console.error(error);
+        }
+    }
+
+    async generateSummary(text: string, format: 'short' | 'medium' | 'detailed', chatView?: AIChatView): Promise<string> {
+        const summaryFormat = this.summaryFormats[format];
+        return await this.callAI(text, summaryFormat.prompt, chatView);
+    }
+
+    async suggestTags(content: string, chatView?: AIChatView): Promise<string[]> {
+        const prompt = `Analyze this text and suggest relevant tags. Consider topics, themes, type of content (e.g., task, idea, book summary), and key concepts. Format your response as a comma-separated list of tags without the # symbol. Example: philosophy, task, idea`;
+        
+        const response = await this.callAI(content, prompt, chatView);
+        return response.split(',').map(tag => tag.trim());
+    }
+}
+
+class TagSelectionModal extends Modal {
+    private suggestedTags: string[];
+    private selectedTags: Set<string>;
+    private onSubmit: (tags: string[]) => void;
+
+    constructor(app: App, suggestedTags: string[], onSubmit: (tags: string[]) => void) {
+        super(app);
+        this.suggestedTags = suggestedTags;
+        this.selectedTags = new Set(suggestedTags);
+        this.onSubmit = onSubmit;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+
+        contentEl.createEl('h2', { text: 'Suggested Tags' });
+
+        const tagContainer = contentEl.createDiv('tag-container');
+        this.suggestedTags.forEach(tag => {
+            const tagEl = tagContainer.createEl('div', { cls: 'tag-option selected' });
+            tagEl.textContent = `#${tag}`;
+            
+            tagEl.onclick = () => {
+                if (this.selectedTags.has(tag)) {
+                    this.selectedTags.delete(tag);
+                    tagEl.removeClass('selected');
+                } else {
+                    this.selectedTags.add(tag);
+                    tagEl.addClass('selected');
+                }
+            };
+        });
+
+        const buttonContainer = contentEl.createDiv('button-container');
+        const submitButton = buttonContainer.createEl('button', { text: 'Add Selected Tags' });
+        submitButton.onclick = () => {
+            this.onSubmit(Array.from(this.selectedTags));
+            this.close();
+        };
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
     }
 }
