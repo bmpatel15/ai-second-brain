@@ -2,7 +2,7 @@
  * Obsidian AI-Powered Second Brain Plugin
  * - Features: AI-powered note linking, summarization, writing assistant.
  */
-import { Plugin, Notice, PluginSettingTab, App, Setting, TFile, MarkdownView, Editor } from "obsidian";
+import { Plugin, Notice, PluginSettingTab, App, Setting, TFile, Editor } from "obsidian";
 import OpenAI from "openai";
 import { ItemView, WorkspaceLeaf, MarkdownRenderer } from "obsidian";
 
@@ -513,20 +513,36 @@ class AIChatView extends ItemView {
 
     private async insertResponseIntoNote(response: string) {
         const activeFile = this.app.workspace.getActiveFile();
-        if (!activeFile) return;
+        if (!activeFile) {
+            console.log("No active file found");
+            return;
+        }
         
-        const editor: Editor | undefined = this.app.workspace.getActiveViewOfType(MarkdownView)?.editor;
-        if (!editor) return;
+        console.log("Active file:", activeFile.path);
         
-        const formattedResponse = `\n\n---\n**AI Response:**\n${response}\n---\n`;
-        
-        // Always append to the end of the note
-        const endPosition = {
-            line: editor.lineCount(),
-            ch: 0
-        };
-        
-        editor.replaceRange(formattedResponse, endPosition);
+        try {
+            const currentContent = await this.app.vault.read(activeFile);
+            console.log("Current content length:", currentContent.length);
+            
+            const formattedResponse = `\n\n---\n**AI Response:**\n${response}\n---\n`;
+            console.log("Formatted response:", formattedResponse);
+            
+            const updatedContent = currentContent + formattedResponse;
+            console.log("Updated content length:", updatedContent.length);
+            
+            await this.app.vault.modify(activeFile, updatedContent);
+            console.log("File modification completed");
+            
+            // Verify the change
+            const newContent = await this.app.vault.read(activeFile);
+            console.log("New content length after modification:", newContent.length);
+            console.log("Content was changed:", newContent.length > currentContent.length);
+            
+            new Notice("✅ Response added to the end of the note!");
+        } catch (error) {
+            console.error("Error inserting response:", error);
+            new Notice("❌ Error inserting response into note");
+        }
     }
 }
 
@@ -602,7 +618,7 @@ export default class AIPoweredSecondBrain extends Plugin {
 
         // Add editor menu item (appears when text is selected)
         this.registerEvent(
-            this.app.workspace.on("editor-menu", (menu, editor) => {
+            this.app.workspace.on("editor-menu", (menu, editor: Editor) => {
                 const selection = editor.getSelection();
                 if (selection) {
                     // Add "Summarize and Replace" option
