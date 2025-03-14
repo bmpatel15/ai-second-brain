@@ -266,7 +266,10 @@ class AIChatView extends ItemView {
     }
 
     private updateSessionStats() {
-        this.sessionStats.innerHTML = `Session Stats: 💰 $${this.sessionCost.toFixed(4)} | 📥 ${this.sessionInputTokens} input tokens | 📤 ${this.sessionOutputTokens} output tokens`;
+        this.sessionStats.empty();
+        this.sessionStats.createSpan({
+            text: `Session Stats: 💰 $${this.sessionCost.toFixed(4)} | 📥 ${this.sessionInputTokens} input tokens | 📤 ${this.sessionOutputTokens} output tokens`
+        });
     }
 
     private async handleUserInput(input: string) {
@@ -310,20 +313,16 @@ class AIChatView extends ItemView {
             cls: `chat-message ${role}-message`
         });
 
-        // Render markdown content
         MarkdownRenderer.renderMarkdown(content, messageEl, "", this.plugin);
         
-        // Add insert button for assistant messages
         if (role === "assistant") {
             const buttonContainer = messageEl.createEl("div", {
-                cls: "message-actions",
-                attr: { style: "margin-top: 8px;" }
+                cls: "message-actions"
             });
             
             const insertButton = buttonContainer.createEl("button", {
                 text: "📝 Insert into Note",
-                cls: "insert-response-button",
-                attr: { style: "font-size: 0.8em; padding: 4px 8px;" }
+                cls: "insert-response-button"
             });
             
             insertButton.addEventListener("click", () => {
@@ -332,7 +331,6 @@ class AIChatView extends ItemView {
             });
         }
         
-        // Scroll to bottom
         this.chatContainer.scrollTo({
             top: this.chatContainer.scrollHeight,
             behavior: "smooth"
@@ -521,30 +519,15 @@ class AIChatView extends ItemView {
     private async insertResponseIntoNote(response: string) {
         const activeFile = this.app.workspace.getActiveFile();
         if (!activeFile) {
-            console.log("No active file found");
+            new Notice("No active file found");
             return;
         }
         
-        console.log("Active file:", activeFile.path);
-        
         try {
             const currentContent = await this.app.vault.read(activeFile);
-            console.log("Current content length:", currentContent.length);
-            
             const formattedResponse = `\n\n---\n**AI Response:**\n${response}\n---\n`;
-            console.log("Formatted response:", formattedResponse);
-            
             const updatedContent = currentContent + formattedResponse;
-            console.log("Updated content length:", updatedContent.length);
-            
             await this.app.vault.modify(activeFile, updatedContent);
-            console.log("File modification completed");
-            
-            // Verify the change
-            const newContent = await this.app.vault.read(activeFile);
-            console.log("New content length after modification:", newContent.length);
-            console.log("Content was changed:", newContent.length > currentContent.length);
-            
             new Notice("✅ Response added to the end of the note!");
         } catch (error) {
             console.error("Error inserting response:", error);
@@ -586,8 +569,6 @@ export default class AIPoweredSecondBrain extends Plugin {
     }
 
     async onload() {
-        console.log("AI Summary Plugin Loaded");
-
         await this.loadSettings();
         this.addSettingTab(new AIPoweredSecondBrainSettingTab(this.app, this));
 
@@ -869,19 +850,15 @@ export default class AIPoweredSecondBrain extends Plugin {
         const indicator = new Notice("Computing note embeddings...", 0);
         
         try {
-            console.log(`Starting to compute embeddings for ${files.length} files`);
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
                 try {
                     await this.updateNoteEmbedding(file, chatView);
-                    console.log(`Processed ${file.path}`);
                     indicator.setMessage(`Computing embeddings: ${i + 1}/${files.length}`);
                 } catch (error) {
                     console.error(`Error processing ${file.path}:`, error);
                 }
             }
-            
-            console.log(`Finished computing embeddings. Cache size: ${this.settings.embeddingCache.embeddings.length}`);
         } catch (error) {
             console.error("Error in updateAllEmbeddings:", error);
         } finally {
@@ -1012,12 +989,15 @@ class TagSelectionModal extends Modal {
 
         contentEl.createEl('h2', { text: 'Suggested Tags' });
 
-        const tagContainer = contentEl.createDiv('tag-container');
+        const tagContainer = contentEl.createDiv({ cls: 'tag-container' });
+        
         this.suggestedTags.forEach(tag => {
-            const tagEl = tagContainer.createEl('div', { cls: 'tag-option selected' });
-            tagEl.textContent = `#${tag}`;
+            const tagEl = tagContainer.createEl('div', { 
+                cls: 'tag-option selected',
+                text: `#${tag}`
+            });
             
-            tagEl.onclick = () => {
+            tagEl.addEventListener("click", () => {
                 if (this.selectedTags.has(tag)) {
                     this.selectedTags.delete(tag);
                     tagEl.removeClass('selected');
@@ -1025,15 +1005,18 @@ class TagSelectionModal extends Modal {
                     this.selectedTags.add(tag);
                     tagEl.addClass('selected');
                 }
-            };
+            });
         });
 
-        const buttonContainer = contentEl.createDiv('button-container');
-        const submitButton = buttonContainer.createEl('button', { text: 'Add Selected Tags' });
-        submitButton.onclick = () => {
+        const buttonContainer = contentEl.createDiv({ cls: 'button-container' });
+        const submitButton = buttonContainer.createEl('button', { 
+            text: 'Add Selected Tags'
+        });
+        
+        submitButton.addEventListener("click", () => {
             this.onSubmit(Array.from(this.selectedTags));
             this.close();
-        };
+        });
     }
 
     onClose() {
